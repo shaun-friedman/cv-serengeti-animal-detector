@@ -46,24 +46,17 @@ AUTOTUNE = tf.data.AUTOTUNE
 
 def download_dataset(dataset_id: str = "silviamatoke/serengeti-dataset") -> str:
     """
-    Download dataset from Kaggle and move it to the standard location.
+    Download dataset from Kaggle using kagglehub.
 
     Args:
         dataset_id: Kaggle dataset identifier (default: silviamatoke/serengeti-dataset)
 
     Returns:
-        Path to the downloaded dataset
+        Path to the downloaded dataset (kagglehub cache location)
     """
     path = kagglehub.dataset_download(dataset_id)
     print("Path to dataset files:", path)
-
-    # Move to standard location
-    target_path = DATASET_PATH
-    if os.path.exists(target_path):
-        shutil.rmtree(target_path)
-    shutil.move(path, target_path)
-
-    return target_path
+    return path
 
 
 # =============================================================================
