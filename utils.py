@@ -10,6 +10,7 @@ This module contains:
 
 import os
 import shutil
+import subprocess
 
 import cv2
 import kagglehub
@@ -27,7 +28,7 @@ from sklearn.preprocessing import LabelEncoder
 
 GOOGLE_DRIVE_SERENGETI_PATH = "/content/drive/MyDrive/serengeti"
 DATASET_PATH = "/content/dataset"
-LABELS_PATH = "/content/labels.csv"
+LABELS_URL = "https://drive.google.com/uc?export=download&id=1F6PzJw6WqUUP_-a7r_xNpkKCjZ00tIWc"
 DATASET_BASE_PATH = "/content/dataset/Set1/"
 UNLABELED_PATH_BASE = "/content/dataset/Set1/1.58-Roe_Deer/SEQ767"
 
@@ -64,17 +65,24 @@ def download_dataset(dataset_id: str = "silviamatoke/serengeti-dataset") -> str:
 # =============================================================================
 
 
-def load_labels(labels_path: str = LABELS_PATH) -> pd.DataFrame:
+def load_labels(output_path: str = "labels.csv") -> pd.DataFrame:
     """
-    Load labels CSV file.
+    Download labels CSV from Google Drive and load it.
 
     Args:
-        labels_path: Path to the labels CSV file
+        output_path: Local path to save the downloaded CSV file
 
     Returns:
         DataFrame with label data
     """
-    labels_df = pd.read_csv(labels_path)
+    # Download from Google Drive using wget
+    subprocess.run(
+        ["wget", "-q", LABELS_URL, "-O", output_path],
+        check=True
+    )
+    print(f"✓ Downloaded labels.csv to {output_path}")
+    
+    labels_df = pd.read_csv(output_path)
     return labels_df
 
 
