@@ -26,18 +26,18 @@ from sklearn.preprocessing import LabelEncoder
 # Path Constants
 # =============================================================================
 
-GOOGLE_DRIVE_SERENGETI_PATH = "/content/drive/MyDrive/serengeti"
 DATASET_PATH = "/content/dataset"
 LABELS_URL = "https://drive.google.com/uc?export=download&id=1F6PzJw6WqUUP_-a7r_xNpkKCjZ00tIWc"
 DATASET_BASE_PATH = "/content/dataset/Set1/"
 UNLABELED_PATH_BASE = "/content/dataset/Set1/1.58-Roe_Deer/SEQ767"
 
 # =============================================================================
-# Configuration Constants
+# Configuration Constants (defaults - can be overridden in function calls)
 # =============================================================================
 
-IMAGE_SIZE = (128, 128)
-BATCH_SIZE = 32
+# Default values - override by passing parameters to functions
+DEFAULT_IMAGE_SIZE = (224, 224)  # 224x224 for ViT, 128x128 for CNN
+DEFAULT_BATCH_SIZE = 16  # 16 for ViT (memory intensive), 32 for CNN
 AUTOTUNE = tf.data.AUTOTUNE
 
 # =============================================================================
@@ -123,59 +123,76 @@ def prepare_label_data(
 # =============================================================================
 
 
-def load_and_preprocess(path, label, bbox=None):
+def _create_load_and_preprocess_fn(image_size):
     """
-    Load and preprocess a single image with its label and bounding box.
-
+    Create a load_and_preprocess function with the specified image size.
+    
     Args:
-        path: Path to the image file
-        label: Class label (integer)
-        bbox: Bounding box coordinates [x1, y1, x2, y2] or None
-
+        image_size: Tuple of (height, width) for resizing images
+    
     Returns:
-        Tuple of (image, {"class_output": label, "bbox_output": bbox}, path)
+        A function that loads and preprocesses images
     """
-    image_bytes = tf.io.read_file(path)
+    def load_and_preprocess(path, label, bbox=None):
+        """
+        Load and preprocess a single image with its label and bounding box.
 
-    # Check if file is a valid JPEG
-    is_jpeg = tf.image.is_jpeg(image_bytes)
+        Args:
+            path: Path to the image file
+            label: Class label (integer)
+            bbox: Bounding box coordinates [x1, y1, x2, y2] or None
 
-    # If file is not valid, class is set to -1 and filtered out
-    def invalid():
-        return (
-            tf.zeros(IMAGE_SIZE + (3,)),
-            {"class_output": -1, "bbox_output": tf.zeros((4,))},
-            path,
-        )
+        Returns:
+            Tuple of (image, {"class_output": label, "bbox_output": bbox}, path)
+        """
+        image_bytes = tf.io.read_file(path)
 
-    def valid():
-        image = tf.image.decode_jpeg(image_bytes, channels=3)
-        image = tf.image.resize(image, IMAGE_SIZE)
-        image = tf.image.convert_image_dtype(image, tf.float32)
+        # Check if file is a valid JPEG
+        is_jpeg = tf.image.is_jpeg(image_bytes)
 
-        # Normalize bounding box for resized image
-        h = tf.cast(tf.shape(image)[0], tf.float32)
-        w = tf.cast(tf.shape(image)[1], tf.float32)
-        if bbox is not None:
-            bbox_norm = bbox / [w, h, w, h]
-        else:
-            bbox_norm = tf.zeros((4,))
+        # If file is not valid, class is set to -1 and filtered out
+        def invalid():
+            return (
+                tf.zeros(image_size + (3,)),
+                {"class_output": -1, "bbox_output": tf.zeros((4,))},
+                path,
+            )
 
-        bbox_norm = tf.cast(bbox_norm, tf.float32)
+        def valid():
+            image = tf.image.decode_jpeg(image_bytes, channels=3)
+            
+            # Get original dimensions for bbox normalization
+            orig_h = tf.cast(tf.shape(image)[0], tf.float32)
+            orig_w = tf.cast(tf.shape(image)[1], tf.float32)
+            
+            # Resize to target size
+            image = tf.image.resize(image, image_size)
+            image = tf.image.convert_image_dtype(image, tf.float32)
 
-        return (
-            image,
-            {"class_output": label, "bbox_output": bbox_norm},
-            path,
-        )
+            # Normalize bounding box relative to original image dimensions
+            if bbox is not None:
+                bbox_norm = bbox / [orig_w, orig_h, orig_w, orig_h]
+            else:
+                bbox_norm = tf.zeros((4,))
 
-    return tf.cond(is_jpeg, valid, invalid)
+            bbox_norm = tf.cast(bbox_norm, tf.float32)
+
+            return (
+                image,
+                {"class_output": label, "bbox_output": bbox_norm},
+                path,
+            )
+
+        return tf.cond(is_jpeg, valid, invalid)
+    
+    return load_and_preprocess
 
 
 def build_tf_dataset(
     filepaths: np.ndarray,
     labels: np.ndarray,
     bbox_array: np.ndarray,
+    image_size: tuple = None,
 ) -> tf.data.Dataset:
     """
     Build a TensorFlow dataset from file paths, labels, and bounding boxes.
@@ -184,10 +201,17 @@ def build_tf_dataset(
         filepaths: Array of image file paths
         labels: Array of integer class labels
         bbox_array: Array of bounding box coordinates
+        image_size: Tuple of (height, width) for resizing (default: DEFAULT_IMAGE_SIZE)
 
     Returns:
         tf.data.Dataset with (image, labels_dict, path) tuples
     """
+    if image_size is None:
+        image_size = DEFAULT_IMAGE_SIZE
+    
+    # Create preprocessing function with the specified image size
+    load_and_preprocess = _create_load_and_preprocess_fn(image_size)
+    
     ds = tf.data.Dataset.from_tensor_slices((filepaths, labels, bbox_array))
     ds = ds.map(load_and_preprocess, num_parallel_calls=AUTOTUNE)
     ds = ds.filter(lambda image, labels, path: labels["class_output"] != -1)
@@ -199,6 +223,7 @@ def build_tf_dataset(
 def build_unlabeled_dataset(
     unlabeled_path_base: str = UNLABELED_PATH_BASE,
     filler_label: int = 13,
+    image_size: tuple = None,
 ) -> tf.data.Dataset:
     """
     Build a dataset from unlabeled images.
@@ -206,10 +231,17 @@ def build_unlabeled_dataset(
     Args:
         unlabeled_path_base: Base path containing unlabeled images
         filler_label: Label to assign to unlabeled images (default: 13)
+        image_size: Tuple of (height, width) for resizing (default: DEFAULT_IMAGE_SIZE)
 
     Returns:
         tf.data.Dataset with unlabeled images
     """
+    if image_size is None:
+        image_size = DEFAULT_IMAGE_SIZE
+    
+    # Create preprocessing function with the specified image size
+    load_and_preprocess = _create_load_and_preprocess_fn(image_size)
+    
     unlabeled_files = os.listdir(unlabeled_path_base)
     unlabeled_filepaths = np.array(
         [unlabeled_path_base + "/" + file for file in unlabeled_files]
@@ -230,7 +262,7 @@ def split_dataset(
     total_size: int,
     train_frac: float = 0.8,
     val_frac: float = 0.1,
-    batch_size: int = BATCH_SIZE,
+    batch_size: int = None,
     shuffle_buffer: int = 500,
     seed: int = 1337,
 ) -> dict:
@@ -249,6 +281,9 @@ def split_dataset(
     Returns:
         Dictionary with keys: 'train', 'val', 'test', 'train_raw', 'val_raw', 'test_raw'
     """
+    if batch_size is None:
+        batch_size = DEFAULT_BATCH_SIZE
+    
     train_size = int(train_frac * total_size)
     val_size = int(val_frac * total_size)
 
@@ -317,6 +352,7 @@ def plot_prediction(
     image: np.ndarray,
     true_label: int = None,
     true_bbox: np.ndarray = None,
+    image_size: tuple = None,
 ):
     """
     Plot an image with predicted and ground truth bounding boxes.
@@ -328,7 +364,11 @@ def plot_prediction(
         image: Preprocessed image array
         true_label: Ground truth class label (optional)
         true_bbox: Ground truth bounding box (optional)
+        image_size: Tuple of (height, width) used for the model (default: DEFAULT_IMAGE_SIZE)
     """
+    if image_size is None:
+        image_size = DEFAULT_IMAGE_SIZE
+    
     # Load original image for display
     img_bytes = tf.io.read_file(filepath)
     img = tf.image.decode_jpeg(img_bytes, channels=3)
@@ -342,7 +382,7 @@ def plot_prediction(
 
     # Convert normalized predicted bbox → pixels
     pred_bbox = pred_bbox[0]
-    x1, y1, x2, y2 = denormalize_bbox(pred_bbox, IMAGE_SIZE[0], IMAGE_SIZE[1])
+    x1, y1, x2, y2 = denormalize_bbox(pred_bbox, image_size[0], image_size[1])
 
     # Plot
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -362,7 +402,7 @@ def plot_prediction(
 
     # Ground truth bbox (optional, if provided)
     if true_bbox is not None:
-        tx1, ty1, tx2, ty2 = denormalize_bbox(true_bbox, IMAGE_SIZE[0], IMAGE_SIZE[1])
+        tx1, ty1, tx2, ty2 = denormalize_bbox(true_bbox, image_size[0], image_size[1])
         rect_gt = patches.Rectangle(
             (tx1, ty1),
             (tx2 - tx1),
